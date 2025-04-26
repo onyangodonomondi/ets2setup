@@ -41,6 +41,112 @@ log() {
 log "Starting ETS2 server setup"
 
 # ===================================================================
+# USER CREATION WHEN RUN AS ROOT
+# ===================================================================
+# Function to generate a random password
+generate_random_password() {
+    local length=12
+    local chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+"
+    local password=""
+    
+    # Generate random password
+    for (( i=0; i<$length; i++ )); do
+        password+="${chars:RANDOM%${#chars}:1}"
+    done
+    
+    echo "$password"
+}
+
+# If running as root, create a new user
+if [ "$EUID" -eq 0 ]; then
+    log "Running as root. Setting up a dedicated user for ETS2 server."
+    
+    # Prompt for username
+    read -p "Enter username for the new ETS2 server user (default: ets2server): " NEW_USER
+    NEW_USER=${NEW_USER:-"ets2server"}
+    
+    # Check if user already exists
+    if id "$NEW_USER" &>/dev/null; then
+        log "User $NEW_USER already exists. Using existing user."
+    else
+        log "Creating new user: $NEW_USER"
+        
+        # Ask how to handle password
+        echo "Password options:"
+        echo "1) Generate random password"
+        echo "2) Set password manually"
+        read -p "Choose option (1/2, default: 1): " PASSWORD_OPTION
+        PASSWORD_OPTION=${PASSWORD_OPTION:-"1"}
+        
+        if [ "$PASSWORD_OPTION" = "1" ]; then
+            # Generate random password
+            USER_PASSWORD=$(generate_random_password)
+            log "Generated random password for $NEW_USER"
+            
+            # Create user with random password
+            useradd -m -s /bin/bash "$NEW_USER"
+            echo "$NEW_USER:$USER_PASSWORD" | chpasswd
+            
+            echo "========================================"
+            echo "Created user: $NEW_USER"
+            echo "Random password: $USER_PASSWORD"
+            echo "IMPORTANT: Save this password now!"
+            echo "========================================"
+            
+            # Wait for user acknowledgment
+            read -p "Press Enter to continue once you've saved the password..."
+            
+        else
+            # Create user without password
+            useradd -m -s /bin/bash "$NEW_USER"
+            
+            echo "You have 1 minute to set a password for $NEW_USER"
+            echo "Setting password in 5 seconds..."
+            sleep 5
+            
+            # Set a timer for password setting
+            ( sleep 60 && kill -ALRM $$ ) &
+            TIMER_PID=$!
+            
+            # Setup trap to handle timeout
+            trap "echo 'Password setup timed out'; passwd -l '$NEW_USER'; echo 'Account locked. Run passwd $NEW_USER as root to set password later.'; kill $TIMER_PID; trap - ALRM; TIMEOUT=true" ALRM
+            
+            # Try to set password
+            TIMEOUT=false
+            passwd "$NEW_USER"
+            
+            # Kill timer if still running
+            kill $TIMER_PID 2>/dev/null || true
+            trap - ALRM
+            
+            if [ "$TIMEOUT" = "true" ]; then
+                log "Password setup timed out. Account locked."
+            else
+                log "Password set for $NEW_USER"
+            fi
+        fi
+        
+        # Add user to sudo group
+        usermod -aG sudo "$NEW_USER"
+        log "Added $NEW_USER to sudo group"
+        
+        # Copy the script to the new user's home directory
+        USER_HOME=$(eval echo ~$NEW_USER)
+        cp "$0" "$USER_HOME/"
+        chown "$NEW_USER:$NEW_USER" "$USER_HOME/$(basename "$0")"
+        chmod +x "$USER_HOME/$(basename "$0")"
+        log "Copied setup script to $USER_HOME"
+        
+        # Switch to the new user
+        echo "======================================================================"
+        echo "User $NEW_USER has been created. Please run this script as $NEW_USER:"
+        echo "su - $NEW_USER -c '$USER_HOME/$(basename "$0")'"
+        echo "======================================================================"
+        exit 0
+    fi
+fi
+
+# ===================================================================
 # PRELIMINARY CHECKS
 # ===================================================================
 # Check if running as root (not recommended)
