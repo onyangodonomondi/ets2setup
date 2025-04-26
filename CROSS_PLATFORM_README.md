@@ -103,6 +103,39 @@ The main server configuration file is located at:
 
 You can edit this file to modify server settings like player limit, password, etc.
 
+## Mod Management
+
+This package includes specialized scripts for toggling mods on and off without editing configuration files manually:
+
+### Windows Mod Management
+
+Use the PowerShell script to enable or disable mods:
+
+```powershell
+# Enable mods
+.\toggle_mods.ps1 -Enable
+
+# Disable mods
+.\toggle_mods.ps1
+```
+
+### Linux Mod Management
+
+Use the Bash script with various options:
+
+```bash
+# Enable mods
+./toggle_mods.sh enable
+
+# Disable mods
+./toggle_mods.sh disable
+
+# Toggle between enabled/disabled state
+./toggle_mods.sh
+```
+
+Both scripts automatically create a backup of your configuration before making changes. Remember to restart your server after toggling mods for changes to take effect.
+
 ## Important Note
 
 For a fully functional server, you need to create proper server packages using the ETS2 desktop client:
