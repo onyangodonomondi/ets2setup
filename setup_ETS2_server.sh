@@ -5,8 +5,215 @@
 # Description: Automates the full installation and configuration of an Euro Truck Simulator 2 dedicated server
 # Author: Unknown
 # Usage: ./setup_ets2_server.sh [STEAM_TOKEN]
-# Version: 1.0
+# Version: 1.1
 # ===================================================================
+
+# ===================================================================
+# ERROR HANDLING AND ROBUSTNESS
+# ===================================================================
+# Exit codes
+E_GENERAL=1      # General error
+E_DEPENDENCY=2   # Missing dependency
+E_NETWORK=3      # Network issue
+E_PERMISSION=4   # Permission issue
+E_INVALID=5      # Invalid input
+E_DISK=6         # Disk space issue
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Trap errors and interrupts
+trap cleanup SIGINT SIGTERM ERR EXIT
+
+# Cleanup function for handling script termination
+cleanup() {
+    trap - SIGINT SIGTERM ERR EXIT
+    local err=$?
+    
+    # Only run cleanup for error or explicit exit
+    if [ $err -ne 0 ]; then
+        echo -e "${RED}Script terminated with error code $err${NC}" >&2
+        if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+            echo "See $LOG_FILE for details."
+            echo "$(date): Script terminated with error code $err" >> "$LOG_FILE"
+        fi
+        
+        # Handle any temporary files or processes
+        if [ -n "$TIMER_PID" ] && ps -p $TIMER_PID > /dev/null; then
+            kill $TIMER_PID 2>/dev/null || true
+        fi
+    fi
+    
+    # Only exit directly when it's an unexpected error
+    # This allows normal exits to proceed
+    if [ $err -ne 0 ] && [ $err -ne 99 ]; then
+        exit $err
+    fi
+}
+
+# Error handler function
+error_exit() {
+    local msg="$1"
+    local code="${2:-$E_GENERAL}"
+    
+    echo -e "${RED}ERROR: $msg${NC}" >&2
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        echo "$(date): ERROR: $msg" >> "$LOG_FILE"
+    fi
+    
+    # Exit with error code (special code 99 is used for expected exits)
+    exit $code
+}
+
+# Warning message function
+warning() {
+    echo -e "${YELLOW}WARNING: $1${NC}" >&2
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        echo "$(date): WARNING: $1" >> "$LOG_FILE"
+    fi
+}
+
+# Success message function
+success() {
+    echo -e "${GREEN}SUCCESS: $1${NC}"
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        echo "$(date): SUCCESS: $1" >> "$LOG_FILE"
+    fi
+}
+
+# Info message function
+info() {
+    echo -e "${BLUE}INFO: $1${NC}"
+    if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
+        echo "$(date): INFO: $1" >> "$LOG_FILE"
+    fi
+}
+
+# Check if a command exists
+command_exists() {
+    command -v "$1" &>/dev/null
+}
+
+# Check disk space
+check_disk_space() {
+    local dir="$1"
+    local min_space="$2" # in MB
+    
+    # Get available disk space in MB
+    local space_available
+    if command_exists df; then
+        space_available=$(df -m "$dir" | awk 'NR==2 {print $4}')
+        if [ -z "$space_available" ] || [ "$space_available" -lt "$min_space" ]; then
+            error_exit "Not enough disk space. Required: ${min_space}MB, Available: ${space_available}MB" $E_DISK
+        fi
+    else
+        warning "Cannot check disk space: 'df' command not found"
+    fi
+}
+
+# Validate server token format
+validate_token() {
+    local token="$1"
+    # Basic validation - should be a hex string of 32 characters
+    if ! [[ $token =~ ^[0-9A-F]{32}$ ]]; then
+        warning "Server token format looks invalid. It should be a 32-character hexadecimal string."
+    fi
+}
+
+# Safely download a file with retries
+safe_download() {
+    local url="$1"
+    local output_file="$2"
+    local max_retries=3
+    local retry=0
+    
+    while [ $retry -lt $max_retries ]; do
+        info "Downloading from $url (attempt $((retry + 1))/$max_retries)"
+        if curl -L --fail -o "$output_file" "$url"; then
+            success "Download completed successfully: $output_file"
+            return 0
+        else
+            retry=$((retry + 1))
+            if [ $retry -lt $max_retries ]; then
+                warning "Download failed. Retrying in 5 seconds..."
+                sleep 5
+            else
+                error_exit "Failed to download after $max_retries attempts." $E_NETWORK
+            fi
+        fi
+    done
+    
+    return 1
+}
+
+# Try to install a package if it doesn't exist
+ensure_package() {
+    local package="$1"
+    if ! command_exists "$package"; then
+        info "Package '$package' not found. Attempting to install..."
+        if command_exists apt-get; then
+            sudo apt-get update -qq && sudo apt-get install -y "$package"
+        elif command_exists yum; then
+            sudo yum install -y "$package"
+        elif command_exists dnf; then
+            sudo dnf install -y "$package"
+        else
+            error_exit "Cannot install '$package'. No supported package manager found." $E_DEPENDENCY
+        fi
+    fi
+}
+
+# Create directory safely
+safe_mkdir() {
+    local dir="$1"
+    
+    if [ -e "$dir" ] && [ ! -d "$dir" ]; then
+        error_exit "Cannot create directory '$dir': File exists and is not a directory." $E_GENERAL
+    fi
+    
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir" || error_exit "Failed to create directory: $dir" $E_PERMISSION
+        success "Created directory: $dir"
+    else
+        info "Directory already exists: $dir"
+    fi
+}
+
+# Verify file exists and is readable
+verify_file() {
+    local file="$1"
+    
+    if [ ! -f "$file" ]; then
+        error_exit "Required file not found: $file" $E_GENERAL
+    fi
+    
+    if [ ! -r "$file" ]; then
+        error_exit "Cannot read file: $file" $E_PERMISSION
+    fi
+}
+
+# Test network connectivity
+test_network() {
+    local host="download.eurotrucksimulator2.com"
+    info "Testing network connectivity to $host..."
+    
+    if ping -c 1 "$host" &>/dev/null; then
+        success "Network connectivity confirmed."
+    else
+        warning "Cannot reach $host. Check your internet connection."
+        
+        # Try alternative connectivity test
+        if curl --connect-timeout 5 -s -I "https://$host" &>/dev/null; then
+            success "Network connectivity confirmed (alternate method)."
+        else
+            error_exit "Network connectivity test failed. Check your internet connection." $E_NETWORK
+        fi
+    fi
+}
 
 set -e # Exit on any error
 
@@ -20,6 +227,7 @@ WELCOME_MSG="Welcome to Mkenya ETS2 Trucking Server! Enjoy your journey." # Mess
 MAX_PLAYERS=8                                         # Maximum allowed players
 SERVER_PORT=27015                                     # Main server port
 QUERY_PORT=27016                                      # Query port for server browser
+MIN_DISK_SPACE=1024                                   # Minimum disk space required in MB
 
 # ===================================================================
 # DIRECTORY SETUP
@@ -37,8 +245,13 @@ log() {
 }
 
 # Create log file
-> "$LOG_FILE"
+safe_mkdir "$(dirname "$LOG_FILE")"
+> "$LOG_FILE" || error_exit "Cannot create log file: $LOG_FILE" $E_PERMISSION
 log "Starting ETS2 server setup"
+info "Beginning ETS2 server setup process"
+
+# Validate the server token
+validate_token "$SERVER_TOKEN"
 
 # ===================================================================
 # USER CREATION WHEN RUN AS ROOT
@@ -60,14 +273,21 @@ generate_random_password() {
 # If running as root, create a new user
 if [ "$EUID" -eq 0 ]; then
     log "Running as root. Setting up a dedicated user for ETS2 server."
+    info "Running as root. A dedicated user will be created for security."
     
     # Prompt for username
     read -p "Enter username for the new ETS2 server user (default: ets2server): " NEW_USER
     NEW_USER=${NEW_USER:-"ets2server"}
     
+    # Validate username
+    if [[ ! $NEW_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        warning "Username '$NEW_USER' may not be valid. Using it anyway, but might cause issues."
+    fi
+    
     # Check if user already exists
     if id "$NEW_USER" &>/dev/null; then
         log "User $NEW_USER already exists. Using existing user."
+        info "User $NEW_USER already exists. Will continue with this user."
     else
         log "Creating new user: $NEW_USER"
         
@@ -84,8 +304,8 @@ if [ "$EUID" -eq 0 ]; then
             log "Generated random password for $NEW_USER"
             
             # Create user with random password
-            useradd -m -s /bin/bash "$NEW_USER"
-            echo "$NEW_USER:$USER_PASSWORD" | chpasswd
+            useradd -m -s /bin/bash "$NEW_USER" || error_exit "Failed to create user $NEW_USER" $E_GENERAL
+            echo "$NEW_USER:$USER_PASSWORD" | chpasswd || error_exit "Failed to set password for $NEW_USER" $E_GENERAL
             
             echo "========================================"
             echo "Created user: $NEW_USER"
@@ -98,7 +318,7 @@ if [ "$EUID" -eq 0 ]; then
             
         else
             # Create user without password
-            useradd -m -s /bin/bash "$NEW_USER"
+            useradd -m -s /bin/bash "$NEW_USER" || error_exit "Failed to create user $NEW_USER" $E_GENERAL
             
             echo "You have 1 minute to set a password for $NEW_USER"
             echo "Setting password in 5 seconds..."
@@ -109,11 +329,15 @@ if [ "$EUID" -eq 0 ]; then
             TIMER_PID=$!
             
             # Setup trap to handle timeout
-            trap "echo 'Password setup timed out'; passwd -l '$NEW_USER'; echo 'Account locked. Run passwd $NEW_USER as root to set password later.'; kill $TIMER_PID; trap - ALRM; TIMEOUT=true" ALRM
+            trap "echo 'Password setup timed out'; passwd -l '$NEW_USER'; echo 'Account locked. Run passwd $NEW_USER as root to set password later.'; kill $TIMER_PID 2>/dev/null || true; trap - ALRM; TIMEOUT=true" ALRM
             
             # Try to set password
             TIMEOUT=false
-            passwd "$NEW_USER"
+            passwd "$NEW_USER" || {
+                warning "Failed to set password for $NEW_USER"
+                passwd -l "$NEW_USER"
+                echo "Account locked. Run 'passwd $NEW_USER' as root to set password later."
+            }
             
             # Kill timer if still running
             kill $TIMER_PID 2>/dev/null || true
@@ -121,23 +345,32 @@ if [ "$EUID" -eq 0 ]; then
             
             if [ "$TIMEOUT" = "true" ]; then
                 log "Password setup timed out. Account locked."
+                warning "Password setup timed out. The account has been locked for security."
             else
                 log "Password set for $NEW_USER"
             fi
         fi
         
         # Add user to sudo group
-        usermod -aG sudo "$NEW_USER"
+        usermod -aG sudo "$NEW_USER" || warning "Failed to add $NEW_USER to sudo group. Manual intervention might be needed."
         log "Added $NEW_USER to sudo group"
         
         # Copy the script to the new user's home directory
-        USER_HOME=$(eval echo ~$NEW_USER)
-        cp "$0" "$USER_HOME/"
-        chown "$NEW_USER:$NEW_USER" "$USER_HOME/$(basename "$0")"
-        chmod +x "$USER_HOME/$(basename "$0")"
+        USER_HOME=$(eval echo ~$NEW_USER) || USER_HOME="/home/$NEW_USER"
+        
+        # Make sure the user's home directory exists
+        if [ ! -d "$USER_HOME" ]; then
+            warning "User home directory $USER_HOME does not exist. Creating it."
+            mkdir -p "$USER_HOME" && chown "$NEW_USER:$NEW_USER" "$USER_HOME"
+        fi
+        
+        cp "$0" "$USER_HOME/" || error_exit "Failed to copy script to $USER_HOME" $E_PERMISSION
+        chown "$NEW_USER:$NEW_USER" "$USER_HOME/$(basename "$0")" || warning "Failed to set ownership on copied script"
+        chmod +x "$USER_HOME/$(basename "$0")" || warning "Failed to set execute permission on copied script"
         log "Copied setup script to $USER_HOME"
         
         # Switch to the new user
+        success "User creation complete!"
         echo "======================================================================"
         echo "User $NEW_USER has been created. Please run this script as $NEW_USER:"
         echo "su - $NEW_USER -c '$USER_HOME/$(basename "$0")'"
@@ -152,31 +385,98 @@ fi
 # Check if running as root (not recommended)
 if [ "$EUID" -eq 0 ]; then
     log "Please don't run this script as root. The script will use sudo when needed."
-    exit 1
+    error_exit "Please don't run this script as root. The script will use sudo when needed." $E_PERMISSION
 fi
 
+# Check disk space
+check_disk_space "$ROOT_DIR" "$MIN_DISK_SPACE"
+
+# Test network connectivity
+test_network
+
 # Check for required command-line tools
+info "Checking for required commands..."
+MISSING_PACKAGES=()
+
 for cmd in curl unzip sudo ufw systemctl; do
-    if ! command -v $cmd &> /dev/null; then
-        log "Error: Required command '$cmd' not found. Please install it and try again."
-        exit 1
+    if ! command_exists "$cmd"; then
+        MISSING_PACKAGES+=("$cmd")
+        log "Required command '$cmd' not found."
     fi
 done
+
+# Try to install missing packages if any
+if [ ${#MISSING_PACKAGES[@]} -gt 0 ]; then
+    log "Some required commands are missing. Attempting to install..."
+    info "Installing missing commands: ${MISSING_PACKAGES[*]}"
+    
+    for pkg in "${MISSING_PACKAGES[@]}"; do
+        ensure_package "$pkg"
+    done
+    
+    # Verify installation
+    STILL_MISSING=()
+    for cmd in "${MISSING_PACKAGES[@]}"; do
+        if ! command_exists "$cmd"; then
+            STILL_MISSING+=("$cmd")
+        fi
+    done
+    
+    if [ ${#STILL_MISSING[@]} -gt 0 ]; then
+        error_exit "Failed to install required packages: ${STILL_MISSING[*]}" $E_DEPENDENCY
+    else
+        success "All required commands are now available."
+    fi
+else
+    success "All required commands are available."
+fi
 
 # ===================================================================
 # INSTALL DEPENDENCIES
 # ===================================================================
 log "Installing required packages..."
-sudo apt update
-sudo apt install -y curl unzip net-tools ufw
+info "Updating package lists and installing dependencies..."
+
+# We use a function here to catch errors and provide better messages
+install_dependencies() {
+    sudo apt update || {
+        warning "Failed to update package lists. Continuing anyway..."
+        return 1
+    }
+    
+    sudo apt install -y curl unzip net-tools ufw || {
+        warning "Failed to install some packages. Will try individual installation..."
+        
+        # Try installing packages one by one
+        for pkg in curl unzip net-tools ufw; do
+            info "Installing $pkg..."
+            sudo apt install -y "$pkg" || warning "Failed to install $pkg"
+        done
+    }
+    
+    # Verify critical packages
+    for pkg in curl unzip; do
+        if ! command_exists "$pkg"; then
+            error_exit "Critical package $pkg could not be installed." $E_DEPENDENCY
+        fi
+    done
+}
+
+# Try to install dependencies
+install_dependencies || warning "Some dependencies might be missing. The script will try to continue."
 
 # ===================================================================
 # CREATE DIRECTORY STRUCTURE
 # ===================================================================
 log "Creating directory structure..."
-mkdir -p "$SERVER_DIR"
-mkdir -p "$ROOT_DIR/.local/share/Euro Truck Simulator 2"
-mkdir -p /home/server_packages
+info "Setting up directory structure..."
+
+safe_mkdir "$SERVER_DIR"
+safe_mkdir "$ROOT_DIR/.local/share/Euro Truck Simulator 2"
+safe_mkdir "/home/server_packages" || {
+    warning "Failed to create /home/server_packages. Using alternative location."
+    safe_mkdir "$ROOT_DIR/server_packages"
+}
 
 # ===================================================================
 # DOWNLOAD & EXTRACT SERVER FILES
@@ -184,18 +484,53 @@ mkdir -p /home/server_packages
 # Download ETS2 dedicated server (if not already present)
 if [ ! -f "$ROOT_DIR/ets2_server_pack.zip" ]; then
     log "Downloading ETS2 dedicated server files..."
-    curl -L -o "$ROOT_DIR/ets2_server_pack.zip" "https://download.eurotrucksimulator2.com/server_pack_1.47.zip"
+    info "Downloading server files. This may take a while..."
+    
+    SERVER_PACK_URL="https://download.eurotrucksimulator2.com/server_pack_1.47.zip"
+    PACK_FILE="$ROOT_DIR/ets2_server_pack.zip"
+    
+    # Try to download with retries
+    safe_download "$SERVER_PACK_URL" "$PACK_FILE"
+else
+    info "Server pack already downloaded. Skipping download."
+    
+    # Verify the existing file is valid
+    if ! unzip -t "$ROOT_DIR/ets2_server_pack.zip" &>/dev/null; then
+        warning "The existing ZIP file appears to be corrupt. Re-downloading..."
+        mv "$ROOT_DIR/ets2_server_pack.zip" "$ROOT_DIR/ets2_server_pack.zip.bak"
+        safe_download "https://download.eurotrucksimulator2.com/server_pack_1.47.zip" "$ROOT_DIR/ets2_server_pack.zip"
+    fi
 fi
 
 # Extract server files
 log "Extracting server files..."
-unzip -o "$ROOT_DIR/ets2_server_pack.zip" -d "$SERVER_DIR" 
+info "Extracting server files..."
+
+if ! unzip -o "$ROOT_DIR/ets2_server_pack.zip" -d "$SERVER_DIR"; then
+    error_exit "Failed to extract server files. The ZIP file may be corrupt." $E_GENERAL
+fi
+
+success "Server files extracted successfully."
 
 # ===================================================================
 # SET PERMISSIONS
 # ===================================================================
 log "Setting permissions..."
-chmod -R 755 "$SERVER_DIR/bin"
+info "Setting executable permissions..."
+
+chmod -R 755 "$SERVER_DIR/bin" || {
+    warning "Failed to set permissions on server binaries. Trying alternate method..."
+    find "$SERVER_DIR/bin" -type f -exec chmod +x {} \;
+}
+
+# Double check the critical executables
+for exe in "$SERVER_DIR/bin/linux_x64/server_launch.sh" "$SERVER_DIR/bin/linux_x64/eurotrucks2_server"; do
+    if [ -f "$exe" ]; then
+        chmod +x "$exe" || warning "Failed to set execute permission on $exe"
+    else
+        warning "Expected executable not found: $exe"
+    fi
+done
 
 # ===================================================================
 # CREATE SERVER CONFIGURATION FILES
