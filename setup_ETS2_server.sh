@@ -18,13 +18,140 @@ E_NETWORK=3      # Network issue
 E_PERMISSION=4   # Permission issue
 E_INVALID=5      # Invalid input
 E_DISK=6         # Disk space issue
+E_PLATFORM=7     # Unsupported platform
+E_VERSION=8      # Version mismatch
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Script version
+SCRIPT_VERSION="1.2.0"
+
+# ===================================================================
+# PLATFORM DETECTION AND COMPATIBILITY
+# ===================================================================
+# Detect the operating system family and version
+detect_platform() {
+    # Default to unknown
+    OS_TYPE="unknown"
+    OS_VERSION="unknown"
+    PACKAGE_MANAGER=""
+    
+    # Check for common distribution detection methods
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS_TYPE=$ID
+        OS_VERSION=$VERSION_ID
+    elif [ -f /etc/lsb-release ]; then
+        . /etc/lsb-release
+        OS_TYPE=$DISTRIB_ID
+        OS_VERSION=$DISTRIB_RELEASE
+    elif [ -f /etc/debian_version ]; then
+        OS_TYPE="debian"
+        OS_VERSION=$(cat /etc/debian_version)
+    elif [ -f /etc/redhat-release ]; then
+        OS_TYPE=$(grep -o -E '(Red Hat|CentOS|Fedora)' /etc/redhat-release | head -1 | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+        OS_VERSION=$(grep -o -E '[0-9]+\.[0-9]+' /etc/redhat-release | head -1)
+    elif [ -f /etc/arch-release ]; then
+        OS_TYPE="arch"
+        OS_VERSION="rolling"
+    elif [ -f /etc/gentoo-release ]; then
+        OS_TYPE="gentoo"
+        OS_VERSION=$(cat /etc/gentoo-release | grep -o -E '[0-9]+\.[0-9]+')
+    fi
+    
+    # Convert OS_TYPE to lowercase
+    OS_TYPE=$(echo "$OS_TYPE" | tr '[:upper:]' '[:lower:]')
+    
+    # Determine package manager
+    case "$OS_TYPE" in
+        ubuntu|debian|raspbian|pop|mint|kali|zorin|elementary|deepin)
+            PACKAGE_MANAGER="apt"
+            ;;
+        fedora)
+            PACKAGE_MANAGER="dnf"
+            ;;
+        centos|rhel|redhat|rocky|almalinux|ol)
+            if [ "${OS_VERSION%%.*}" -ge 8 ]; then
+                PACKAGE_MANAGER="dnf"
+            else
+                PACKAGE_MANAGER="yum"
+            fi
+            ;;
+        opensuse*|sles)
+            PACKAGE_MANAGER="zypper"
+            ;;
+        arch|manjaro|endeavouros)
+            PACKAGE_MANAGER="pacman"
+            ;;
+        alpine)
+            PACKAGE_MANAGER="apk"
+            ;;
+        gentoo)
+            PACKAGE_MANAGER="emerge"
+            ;;
+        void)
+            PACKAGE_MANAGER="xbps"
+            ;;
+        *)
+            PACKAGE_MANAGER="unknown"
+            ;;
+    esac
+    
+    # Log the detected platform information
+    log "Detected operating system: $OS_TYPE $OS_VERSION"
+    log "Detected package manager: $PACKAGE_MANAGER"
+    
+    # Return false if we couldn't determine the package manager
+    if [ "$PACKAGE_MANAGER" = "unknown" ]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Install packages based on the detected package manager
+install_packages() {
+    local packages=("$@")
+    
+    case "$PACKAGE_MANAGER" in
+        apt)
+            sudo apt-get update -q
+            sudo apt-get install -y "${packages[@]}"
+            ;;
+        dnf)
+            sudo dnf install -y "${packages[@]}"
+            ;;
+        yum)
+            sudo yum install -y "${packages[@]}"
+            ;;
+        zypper)
+            sudo zypper install -y "${packages[@]}"
+            ;;
+        pacman)
+            sudo pacman -Sy --noconfirm "${packages[@]}"
+            ;;
+        apk)
+            sudo apk add "${packages[@]}"
+            ;;
+        emerge)
+            sudo emerge --ask=n "${packages[@]}"
+            ;;
+        xbps)
+            sudo xbps-install -y "${packages[@]}"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    
+    return $?
+}
 
 # Trap errors and interrupts
 trap cleanup SIGINT SIGTERM ERR EXIT
@@ -46,6 +173,13 @@ cleanup() {
         if [ -n "$TIMER_PID" ] && ps -p $TIMER_PID > /dev/null; then
             kill $TIMER_PID 2>/dev/null || true
         fi
+        
+        # Clean up any temporary files created by the script
+        for temp_file in "${TEMP_FILES[@]}"; do
+            if [ -f "$temp_file" ]; then
+                rm -f "$temp_file" 2>/dev/null
+            fi
+        done
     fi
     
     # Only exit directly when it's an unexpected error
@@ -53,6 +187,102 @@ cleanup() {
     if [ $err -ne 0 ] && [ $err -ne 99 ]; then
         exit $err
     fi
+}
+
+# ===================================================================
+# VERSION CHECKING AND UPDATE MANAGEMENT
+# ===================================================================
+# Array to track temporary files for cleanup
+TEMP_FILES=()
+
+# Function to check for script updates
+check_for_updates() {
+    info "Checking for script updates..."
+    
+    # URL to the latest version info (this would be your actual update check endpoint)
+    local VERSION_URL="https://raw.githubusercontent.com/yourusername/ets2-server-setup/main/version.txt"
+    local TEMP_VERSION_FILE=$(mktemp)
+    TEMP_FILES+=("$TEMP_VERSION_FILE")
+    
+    # Try to download the version file
+    if ! curl -s --fail "$VERSION_URL" -o "$TEMP_VERSION_FILE"; then
+        warning "Could not check for updates. Continuing with current version."
+        return 1
+    fi
+    
+    # Read the latest version
+    local LATEST_VERSION=$(cat "$TEMP_VERSION_FILE" | grep -oP "VERSION=\K.*")
+    
+    # Compare versions
+    if [ -n "$LATEST_VERSION" ] && [ "$LATEST_VERSION" != "$SCRIPT_VERSION" ]; then
+        echo -e "${YELLOW}Update available!${NC}"
+        echo -e "Current version: ${CYAN}$SCRIPT_VERSION${NC}"
+        echo -e "Latest version: ${GREEN}$LATEST_VERSION${NC}"
+        
+        # Ask if user wants to update
+        read -p "Would you like to update to the latest version? (y/n): " UPDATE_CHOICE
+        
+        if [[ "$UPDATE_CHOICE" =~ ^[Yy]$ ]]; then
+            info "Downloading the latest version..."
+            
+            # URL to the latest script (this would be your actual script URL)
+            local SCRIPT_URL="https://raw.githubusercontent.com/yourusername/ets2-server-setup/main/setup_ETS2_server.sh"
+            local TEMP_SCRIPT_FILE=$(mktemp)
+            TEMP_FILES+=("$TEMP_SCRIPT_FILE")
+            
+            # Download the latest script
+            if curl -s --fail "$SCRIPT_URL" -o "$TEMP_SCRIPT_FILE"; then
+                # Make it executable
+                chmod +x "$TEMP_SCRIPT_FILE"
+                
+                # Replace the current script with the new one
+                mv "$TEMP_SCRIPT_FILE" "$0"
+                
+                success "Update successful! Please restart the script."
+                exit 0
+            else
+                error_exit "Failed to download the update." $E_NETWORK
+            fi
+        fi
+    else
+        info "You are running the latest version ($SCRIPT_VERSION)."
+    fi
+    
+    return 0
+}
+
+# Function to check for the latest server version
+check_server_version() {
+    info "Checking for the latest ETS2 Dedicated Server version..."
+    
+    # This URL would need to be updated with a reliable source for version information
+    local SERVER_INFO_URL="https://download.eurotrucksimulator2.com"
+    local TEMP_INFO_FILE=$(mktemp)
+    TEMP_FILES+=("$TEMP_INFO_FILE")
+    
+    # Try to get the download page
+    if ! curl -s --fail "$SERVER_INFO_URL" -o "$TEMP_INFO_FILE"; then
+        warning "Could not check for server updates. Using default version."
+        ETS2_SERVER_VERSION="1.47"
+        ETS2_SERVER_URL="https://download.eurotrucksimulator2.com/server_pack_1.47.zip"
+        return 1
+    fi
+    
+    # Parse the latest version (this would need to be adapted to the actual content structure)
+    # This is an example pattern that might need to be adjusted
+    local LATEST_VERSION=$(grep -oP "server_pack_\K[0-9]+\.[0-9]+" "$TEMP_INFO_FILE" | sort -V | tail -1)
+    
+    if [ -n "$LATEST_VERSION" ]; then
+        ETS2_SERVER_VERSION="$LATEST_VERSION"
+        ETS2_SERVER_URL="https://download.eurotrucksimulator2.com/server_pack_${LATEST_VERSION}.zip"
+        info "Latest ETS2 Dedicated Server version: $ETS2_SERVER_VERSION"
+    else
+        warning "Could not determine latest server version. Using default."
+        ETS2_SERVER_VERSION="1.47"
+        ETS2_SERVER_URL="https://download.eurotrucksimulator2.com/server_pack_1.47.zip"
+    fi
+    
+    return 0
 }
 
 # Error handler function
@@ -155,14 +385,15 @@ ensure_package() {
     local package="$1"
     if ! command_exists "$package"; then
         info "Package '$package' not found. Attempting to install..."
-        if command_exists apt-get; then
-            sudo apt-get update -qq && sudo apt-get install -y "$package"
-        elif command_exists yum; then
-            sudo yum install -y "$package"
-        elif command_exists dnf; then
-            sudo dnf install -y "$package"
-        else
+        
+        if [ "$PACKAGE_MANAGER" = "unknown" ]; then
             error_exit "Cannot install '$package'. No supported package manager found." $E_DEPENDENCY
+        fi
+        
+        if install_packages "$package"; then
+            success "Successfully installed $package"
+        else
+            error_exit "Failed to install '$package'." $E_DEPENDENCY
         fi
     fi
 }
@@ -215,6 +446,307 @@ test_network() {
     fi
 }
 
+# ===================================================================
+# BACKUP FUNCTIONALITY
+# ===================================================================
+# Create a backup of server files
+create_backup() {
+    local backup_dir="$ROOT_DIR/backups"
+    local timestamp=$(date +"%Y%m%d_%H%M%S")
+    local backup_file="$backup_dir/ets2_server_backup_$timestamp.tar.gz"
+    
+    info "Creating server backup..."
+    
+    # Create backup directory if it doesn't exist
+    safe_mkdir "$backup_dir"
+    
+    # Create a list of files/directories to backup
+    local backup_items=(
+        "$SERVER_DIR/server_config.sii"
+        "$SERVER_DIR/server_packages.sii"
+        "$SERVER_DIR/server_packages.dat"
+    )
+    
+    # Check if files exist before adding them to backup
+    local files_to_backup=()
+    for item in "${backup_items[@]}"; do
+        if [ -e "$item" ]; then
+            files_to_backup+=("$item")
+        fi
+    done
+    
+    # If no files to backup, return
+    if [ ${#files_to_backup[@]} -eq 0 ]; then
+        warning "No files found to backup."
+        return 1
+    fi
+    
+    # Create the backup
+    if ! tar -czf "$backup_file" "${files_to_backup[@]}" 2>/dev/null; then
+        warning "Failed to create backup."
+        return 1
+    fi
+    
+    success "Backup created: $backup_file"
+    
+    # Cleanup old backups (keep last 5)
+    local old_backups=$(ls -t "$backup_dir"/ets2_server_backup_*.tar.gz 2>/dev/null | tail -n +6)
+    if [ -n "$old_backups" ]; then
+        info "Cleaning up old backups..."
+        rm $old_backups
+    fi
+    
+    return 0
+}
+
+# Restore a backup
+restore_backup() {
+    local backup_dir="$ROOT_DIR/backups"
+    
+    # Check if backup directory exists
+    if [ ! -d "$backup_dir" ]; then
+        error_exit "Backup directory not found: $backup_dir" $E_GENERAL
+    fi
+    
+    # List available backups
+    local backups=($(ls -t "$backup_dir"/ets2_server_backup_*.tar.gz 2>/dev/null))
+    
+    if [ ${#backups[@]} -eq 0 ]; then
+        error_exit "No backups found in $backup_dir" $E_GENERAL
+    fi
+    
+    echo "Available backups:"
+    for i in "${!backups[@]}"; do
+        echo "$((i+1)). $(basename "${backups[$i]}")"
+    done
+    
+    # Ask which backup to restore
+    read -p "Enter the number of the backup to restore (or 'q' to quit): " choice
+    
+    if [[ "$choice" =~ ^[Qq]$ ]]; then
+        return 0
+    fi
+    
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt ${#backups[@]} ]; then
+        error_exit "Invalid choice." $E_INVALID
+    fi
+    
+    local selected_backup="${backups[$((choice-1))]}"
+    info "Restoring backup: $selected_backup"
+    
+    # Stop the server if it's running
+    if pgrep -f "eurotrucks2_server" > /dev/null; then
+        info "Stopping the server before restore..."
+        if [ -f "$ROOT_DIR/stop_ets2_server.sh" ]; then
+            "$ROOT_DIR/stop_ets2_server.sh"
+        else
+            pkill -f "eurotrucks2_server"
+        fi
+    fi
+    
+    # Extract the backup
+    if ! tar -xzf "$selected_backup" -C / 2>/dev/null; then
+        error_exit "Failed to restore backup." $E_GENERAL
+    fi
+    
+    success "Backup restored successfully."
+    
+    # Ask if the user wants to start the server
+    read -p "Do you want to start the server now? (y/n): " start_server
+    
+    if [[ "$start_server" =~ ^[Yy]$ ]]; then
+        if [ -f "$ROOT_DIR/start_ets2_server.sh" ]; then
+            "$ROOT_DIR/start_ets2_server.sh"
+        else
+            warning "Start script not found. Please start the server manually."
+        fi
+    fi
+    
+    return 0
+}
+
+# ===================================================================
+# HEALTH CHECK AND VERIFICATION FUNCTIONALITY
+# ===================================================================
+# Function to check if a port is in use
+is_port_in_use() {
+    local port="$1"
+    if command_exists netstat; then
+        netstat -tuln | grep -q ":$port "
+        return $?
+    elif command_exists ss; then
+        ss -tuln | grep -q ":$port "
+        return $?
+    else
+        warning "Cannot check port usage: neither netstat nor ss command found"
+        return 1  # Assume port is in use to be safe
+    fi
+}
+
+# Comprehensive health check function
+run_health_check() {
+    info "Running system health check..."
+    
+    # Track overall health status
+    local health_status=true
+    
+    # 1. Check for required commands
+    echo ""
+    echo "===== Checking required commands ====="
+    for cmd in curl unzip sudo ufw systemctl; do
+        if command_exists "$cmd"; then
+            echo -e "${GREEN}✓ $cmd${NC} is available"
+        else
+            echo -e "${RED}✗ $cmd${NC} is missing"
+            health_status=false
+        fi
+    done
+    
+    # 2. Check disk space
+    echo ""
+    echo "===== Checking disk space ====="
+    local available_space=$(df -m "$ROOT_DIR" | awk 'NR==2 {print $4}')
+    if [ -n "$available_space" ] && [ "$available_space" -gt "$MIN_DISK_SPACE" ]; then
+        echo -e "${GREEN}✓ Sufficient disk space${NC}: $available_space MB available (minimum required: $MIN_DISK_SPACE MB)"
+    else
+        echo -e "${RED}✗ Insufficient disk space${NC}: $available_space MB available (minimum required: $MIN_DISK_SPACE MB)"
+        health_status=false
+    fi
+    
+    # 3. Check server files
+    echo ""
+    echo "===== Checking server files ====="
+    local server_files=(
+        "$SERVER_DIR/server_config.sii"
+        "$SERVER_DIR/server_packages.sii"
+        "$SERVER_DIR/server_packages.dat"
+        "$SERVER_DIR/bin/linux_x64/eurotrucks2_server"
+    )
+    
+    for file in "${server_files[@]}"; do
+        if [ -f "$file" ]; then
+            echo -e "${GREEN}✓ $file${NC} exists"
+        else
+            echo -e "${RED}✗ $file${NC} is missing"
+            health_status=false
+        fi
+    done
+    
+    # 4. Check port availability
+    echo ""
+    echo "===== Checking ports ====="
+    local ports=($SERVER_PORT $QUERY_PORT)
+    
+    for port in "${ports[@]}"; do
+        if ! is_port_in_use "$port"; then
+            echo -e "${GREEN}✓ Port $port${NC} is available"
+        else
+            echo -e "${RED}✗ Port $port${NC} is already in use"
+            health_status=false
+        fi
+    done
+    
+    # 5. Check firewall rules
+    echo ""
+    echo "===== Checking firewall rules ====="
+    if command_exists ufw; then
+        if sudo ufw status | grep -q "Status: active"; then
+            echo -e "${GREEN}✓ Firewall${NC} is active"
+            
+            # Check for our ports
+            local port_rules=$(sudo ufw status | grep -E "$SERVER_PORT|$QUERY_PORT")
+            if [ -n "$port_rules" ]; then
+                echo -e "${GREEN}✓ Firewall rules${NC} for server ports exist"
+            else
+                echo -e "${RED}✗ Firewall rules${NC} for server ports are missing"
+                health_status=false
+            fi
+        else
+            echo -e "${YELLOW}! Firewall${NC} is not active"
+            health_status=false
+        fi
+    else
+        echo -e "${RED}✗ UFW${NC} is not installed"
+        health_status=false
+    fi
+    
+    # 6. Check systemd service
+    echo ""
+    echo "===== Checking systemd service ====="
+    if command_exists systemctl; then
+        if systemctl list-unit-files | grep -q "ets2-server.service"; then
+            echo -e "${GREEN}✓ Systemd service${NC} is installed"
+            
+            local service_status=$(systemctl is-enabled ets2-server.service 2>/dev/null)
+            if [ "$service_status" = "enabled" ]; then
+                echo -e "${GREEN}✓ Service${NC} is enabled to start at boot"
+            else
+                echo -e "${YELLOW}! Service${NC} is not enabled to start at boot"
+            fi
+        else
+            echo -e "${RED}✗ Systemd service${NC} is not installed"
+            health_status=false
+        fi
+    else
+        echo -e "${RED}✗ Systemctl${NC} is not available"
+        health_status=false
+    fi
+    
+    # 7. Check server scripts
+    echo ""
+    echo "===== Checking server scripts ====="
+    local scripts=(
+        "$ROOT_DIR/start_ets2_server.sh"
+        "$ROOT_DIR/stop_ets2_server.sh"
+        "$ROOT_DIR/restart_ets2_server.sh"
+        "$ROOT_DIR/monitor_ets2_server.sh"
+    )
+    
+    for script in "${scripts[@]}"; do
+        if [ -f "$script" ]; then
+            echo -e "${GREEN}✓ $script${NC} exists"
+            
+            if [ -x "$script" ]; then
+                echo -e "${GREEN}✓ $script${NC} is executable"
+            else
+                echo -e "${RED}✗ $script${NC} is not executable"
+                health_status=false
+            fi
+        else
+            echo -e "${RED}✗ $script${NC} is missing"
+            health_status=false
+        fi
+    done
+    
+    # 8. Check cron setup for monitor script
+    echo ""
+    echo "===== Checking cron setup ====="
+    if command_exists crontab; then
+        if crontab -l 2>/dev/null | grep -q "monitor_ets2_server.sh"; then
+            echo -e "${GREEN}✓ Cron job${NC} for monitoring is setup"
+        else
+            echo -e "${RED}✗ Cron job${NC} for monitoring is not setup"
+            health_status=false
+        fi
+    else
+        echo -e "${RED}✗ Crontab${NC} command not available"
+        health_status=false
+    fi
+    
+    # 9. Overall status
+    echo ""
+    echo "===== Overall health status ====="
+    if [ "$health_status" = true ]; then
+        echo -e "${GREEN}System health check passed. Your ETS2 server setup appears to be healthy.${NC}"
+    else
+        echo -e "${RED}System health check found issues. Please address the problems shown above.${NC}"
+    fi
+    
+    echo ""
+    
+    return 0
+}
+
 set -e # Exit on any error
 
 # ===================================================================
@@ -236,6 +768,7 @@ MIN_DISK_SPACE=1024                                   # Minimum disk space requi
 ROOT_DIR=$(pwd)
 SERVER_DIR="$ROOT_DIR/ets2server"                     # Server installation directory
 LOG_FILE="$ROOT_DIR/ets2_setup.log"                   # Setup log file
+BACKUP_DIR="$ROOT_DIR/backups"                        # Directory for backups
 
 # ===================================================================
 # LOGGING FUNCTION
@@ -248,7 +781,29 @@ log() {
 safe_mkdir "$(dirname "$LOG_FILE")"
 > "$LOG_FILE" || error_exit "Cannot create log file: $LOG_FILE" $E_PERMISSION
 log "Starting ETS2 server setup"
-info "Beginning ETS2 server setup process"
+info "Beginning ETS2 server setup process (v$SCRIPT_VERSION)"
+
+# Display script header
+cat << EOF
+====================================================================
+ 🚚 ETS2 SERVER SETUP SCRIPT v$SCRIPT_VERSION
+====================================================================
+This script will install and configure an Euro Truck Simulator 2 
+dedicated server on your Linux system.
+
+EOF
+
+# Detect platform first
+info "Detecting platform..."
+if ! detect_platform; then
+    warning "Could not fully detect platform. Some functionality may be limited."
+fi
+
+# Check for script updates
+check_for_updates
+
+# Check for the latest server version
+check_server_version
 
 # Validate the server token
 validate_token "$SERVER_TOKEN"
@@ -432,6 +987,121 @@ else
 fi
 
 # ===================================================================
+# MENU SYSTEM
+# ===================================================================
+if [ -d "$SERVER_DIR" ] && [ -f "$SERVER_DIR/server_config.sii" ]; then
+    # Server appears to be already installed - show management menu
+    info "An existing ETS2 server installation was detected."
+    echo ""
+    echo "======================================================================"
+    echo " ETS2 SERVER MANAGEMENT MENU"
+    echo "======================================================================"
+    echo "1) Start server"
+    echo "2) Stop server"
+    echo "3) Restart server"
+    echo "4) Run health check"
+    echo "5) Create backup"
+    echo "6) Restore from backup"
+    echo "7) Reinstall/repair server"
+    echo "8) Update server to latest version"
+    echo "9) Exit"
+    echo ""
+    read -p "Enter your choice [1-9]: " MENU_CHOICE
+    
+    case $MENU_CHOICE in
+        1)
+            info "Starting server..."
+            if [ -f "$ROOT_DIR/start_ets2_server.sh" ]; then
+                "$ROOT_DIR/start_ets2_server.sh"
+                exit 0
+            else
+                error_exit "Start script not found." $E_GENERAL
+            fi
+            ;;
+        2)
+            info "Stopping server..."
+            if [ -f "$ROOT_DIR/stop_ets2_server.sh" ]; then
+                "$ROOT_DIR/stop_ets2_server.sh"
+                exit 0
+            else
+                error_exit "Stop script not found." $E_GENERAL
+            fi
+            ;;
+        3)
+            info "Restarting server..."
+            if [ -f "$ROOT_DIR/restart_ets2_server.sh" ]; then
+                "$ROOT_DIR/restart_ets2_server.sh"
+                exit 0
+            else
+                error_exit "Restart script not found." $E_GENERAL
+            fi
+            ;;
+        4)
+            info "Running health check..."
+            run_health_check
+            exit 0
+            ;;
+        5)
+            info "Creating backup..."
+            create_backup
+            exit 0
+            ;;
+        6)
+            info "Restoring from backup..."
+            restore_backup
+            exit 0
+            ;;
+        7)
+            info "Proceeding with reinstall/repair..."
+            # Backup existing configuration before reinstall
+            if [ -d "$SERVER_DIR" ]; then
+                info "Backing up existing configuration before reinstall..."
+                create_backup
+            fi
+            # Continue with installation - fall through to the regular flow
+            ;;
+        8)
+            info "Updating server to latest version..."
+            if [ -d "$SERVER_DIR" ]; then
+                # Create backup first
+                info "Creating backup before update..."
+                create_backup
+                
+                # Check for latest version
+                check_server_version
+                
+                # Stop the server if it's running
+                if pgrep -f "eurotrucks2_server" > /dev/null; then
+                    info "Stopping the server before update..."
+                    if [ -f "$ROOT_DIR/stop_ets2_server.sh" ]; then
+                        "$ROOT_DIR/stop_ets2_server.sh"
+                    else
+                        pkill -f "eurotrucks2_server"
+                    fi
+                fi
+                
+                # Rename old server directory
+                mv "$SERVER_DIR" "${SERVER_DIR}_old_$(date +%Y%m%d%H%M%S)"
+                
+                # Download and install the latest version
+                info "Downloading and installing latest version..."
+                # Continue with installation - fall through to the regular flow
+            else
+                error_exit "Server directory not found. Cannot update." $E_GENERAL
+            fi
+            ;;
+        9)
+            info "Exiting..."
+            exit 0
+            ;;
+        *)
+            warning "Invalid choice. Proceeding with regular setup..."
+            # Continue with installation - fall through to the regular flow
+            ;;
+    esac
+fi
+
+# ===================================================================
 # INSTALL DEPENDENCIES
 # ===================================================================
 log "Installing required packages..."
@@ -439,20 +1109,35 @@ info "Updating package lists and installing dependencies..."
 
 # We use a function here to catch errors and provide better messages
 install_dependencies() {
-    sudo apt update || {
-        warning "Failed to update package lists. Continuing anyway..."
-        return 1
-    }
+    # Check if we have a detected package manager
+    if [ "$PACKAGE_MANAGER" = "unknown" ]; then
+        warning "Unknown package manager. Will try to detect available ones..."
+        if command_exists apt-get; then
+            PACKAGE_MANAGER="apt"
+        elif command_exists dnf; then
+            PACKAGE_MANAGER="dnf"
+        elif command_exists yum; then
+            PACKAGE_MANAGER="yum"
+        else
+            warning "No supported package manager found. Dependencies installation may fail."
+            return 1
+        fi
+    fi
     
-    sudo apt install -y curl unzip net-tools ufw || {
+    # Install packages using the detected package manager
+    local packages=("curl" "unzip" "net-tools" "ufw")
+    if install_packages "${packages[@]}"; then
+        success "Dependencies installed successfully."
+        return 0
+    else
         warning "Failed to install some packages. Will try individual installation..."
         
         # Try installing packages one by one
-        for pkg in curl unzip net-tools ufw; do
+        for pkg in "${packages[@]}"; do
             info "Installing $pkg..."
-            sudo apt install -y "$pkg" || warning "Failed to install $pkg"
+            install_packages "$pkg" || warning "Failed to install $pkg"
         done
-    }
+    fi
     
     # Verify critical packages
     for pkg in curl unzip; do
@@ -460,6 +1145,8 @@ install_dependencies() {
             error_exit "Critical package $pkg could not be installed." $E_DEPENDENCY
         fi
     done
+    
+    return 0
 }
 
 # Try to install dependencies
@@ -473,6 +1160,7 @@ info "Setting up directory structure..."
 
 safe_mkdir "$SERVER_DIR"
 safe_mkdir "$ROOT_DIR/.local/share/Euro Truck Simulator 2"
+safe_mkdir "$BACKUP_DIR"
 safe_mkdir "/home/server_packages" || {
     warning "Failed to create /home/server_packages. Using alternative location."
     safe_mkdir "$ROOT_DIR/server_packages"
@@ -486,7 +1174,7 @@ if [ ! -f "$ROOT_DIR/ets2_server_pack.zip" ]; then
     log "Downloading ETS2 dedicated server files..."
     info "Downloading server files. This may take a while..."
     
-    SERVER_PACK_URL="https://download.eurotrucksimulator2.com/server_pack_1.47.zip"
+    SERVER_PACK_URL=${ETS2_SERVER_URL:-"https://download.eurotrucksimulator2.com/server_pack_1.47.zip"}
     PACK_FILE="$ROOT_DIR/ets2_server_pack.zip"
     
     # Try to download with retries
@@ -498,7 +1186,7 @@ else
     if ! unzip -t "$ROOT_DIR/ets2_server_pack.zip" &>/dev/null; then
         warning "The existing ZIP file appears to be corrupt. Re-downloading..."
         mv "$ROOT_DIR/ets2_server_pack.zip" "$ROOT_DIR/ets2_server_pack.zip.bak"
-        safe_download "https://download.eurotrucksimulator2.com/server_pack_1.47.zip" "$ROOT_DIR/ets2_server_pack.zip"
+        safe_download "${ETS2_SERVER_URL:-"https://download.eurotrucksimulator2.com/server_pack_1.47.zip"}" "$ROOT_DIR/ets2_server_pack.zip"
     fi
 fi
 
@@ -1583,35 +2271,202 @@ success "Server documentation created successfully."
 log "Setup complete!"
 success "ETS2 server setup completed successfully!"
 
+# Run a health check
+info "Running post-installation health check..."
+run_health_check
+
+# Create an initial backup
+info "Creating initial backup..."
+create_backup
+
+# Create help script for management
+cat > "$ROOT_DIR/manage_ets2_server.sh" << 'EOF' || warning "Failed to create management script"
+#!/bin/bash
+# ETS2 Server Management Script
+# Description: Easy management for ETS2 Dedicated Server
+
+# Get the directory of this script
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+cd "$SCRIPT_DIR" || { echo "Failed to change to script directory"; exit 1; }
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+
+# Menu function
+show_menu() {
+    clear
+    echo -e "${BLUE}=====================================================================${NC}"
+    echo -e "${CYAN} ETS2 SERVER MANAGEMENT MENU ${NC}"
+    echo -e "${BLUE}=====================================================================${NC}"
+    echo -e "${GREEN}1) Start server${NC}"
+    echo -e "${RED}2) Stop server${NC}"
+    echo -e "${YELLOW}3) Restart server${NC}"
+    echo -e "${BLUE}4) Run health check${NC}"
+    echo -e "${GREEN}5) Create backup${NC}"
+    echo -e "${YELLOW}6) Restore from backup${NC}"
+    echo -e "${BLUE}7) View server logs${NC}"
+    echo -e "${CYAN}8) Check for updates${NC}"
+    echo -e "${RED}9) Exit${NC}"
+    echo ""
+}
+
+# Main menu loop
+while true; do
+    show_menu
+    read -p "Enter your choice [1-9]: " MENU_CHOICE
+    
+    case $MENU_CHOICE in
+        1)
+            echo -e "${GREEN}Starting server...${NC}"
+            if [ -f "$SCRIPT_DIR/start_ets2_server.sh" ]; then
+                "$SCRIPT_DIR/start_ets2_server.sh"
+                read -p "Press Enter to return to menu..."
+            else
+                echo -e "${RED}Start script not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        2)
+            echo -e "${RED}Stopping server...${NC}"
+            if [ -f "$SCRIPT_DIR/stop_ets2_server.sh" ]; then
+                "$SCRIPT_DIR/stop_ets2_server.sh"
+                read -p "Press Enter to return to menu..."
+            else
+                echo -e "${RED}Stop script not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        3)
+            echo -e "${YELLOW}Restarting server...${NC}"
+            if [ -f "$SCRIPT_DIR/restart_ets2_server.sh" ]; then
+                "$SCRIPT_DIR/restart_ets2_server.sh"
+                read -p "Press Enter to return to menu..."
+            else
+                echo -e "${RED}Restart script not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        4)
+            echo -e "${BLUE}Running health check...${NC}"
+            if [ -f "$SCRIPT_DIR/setup_ETS2_server.sh" ]; then
+                # Execute the health check function directly
+                "$SCRIPT_DIR/setup_ETS2_server.sh"
+                read -p "Press Enter to return to menu..."
+            else
+                echo -e "${RED}Setup script not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        5)
+            echo -e "${GREEN}Creating backup...${NC}"
+            if [ -f "$SCRIPT_DIR/setup_ETS2_server.sh" ]; then
+                # Execute the backup function
+                "$SCRIPT_DIR/setup_ETS2_server.sh"
+                read -p "Press Enter to return to menu..."
+            else
+                echo -e "${RED}Setup script not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        6)
+            echo -e "${YELLOW}Restoring from backup...${NC}"
+            if [ -f "$SCRIPT_DIR/setup_ETS2_server.sh" ]; then
+                # Execute the restore function
+                "$SCRIPT_DIR/setup_ETS2_server.sh"
+                read -p "Press Enter to return to menu..."
+            else
+                echo -e "${RED}Setup script not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        7)
+            echo -e "${BLUE}Viewing server logs...${NC}"
+            if [ -f "$SCRIPT_DIR/ets2_server.log" ]; then
+                less "$SCRIPT_DIR/ets2_server.log" || tail -n 100 "$SCRIPT_DIR/ets2_server.log"
+            else
+                echo -e "${RED}Server log not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        8)
+            echo -e "${CYAN}Checking for updates...${NC}"
+            if [ -f "$SCRIPT_DIR/setup_ETS2_server.sh" ]; then
+                # Execute the update check function
+                "$SCRIPT_DIR/setup_ETS2_server.sh"
+                read -p "Press Enter to return to menu..."
+            else
+                echo -e "${RED}Setup script not found.${NC}"
+                sleep 2
+            fi
+            ;;
+        9)
+            echo -e "${RED}Exiting...${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Try again.${NC}"
+            sleep 2
+            ;;
+    esac
+done
+EOF
+
+# Set execute permissions on management script
+chmod +x "$ROOT_DIR/manage_ets2_server.sh" || warning "Failed to set execute permission on management script"
+
+# Provide detailed final output
 cat << EOF
 
 ======================================================================
- ETS2 SERVER SETUP COMPLETED SUCCESSFULLY!
+ 🚚 ETS2 SERVER SETUP COMPLETED SUCCESSFULLY!
 ======================================================================
 
-Server configuration:
+Server information:
 - Server name: $SERVER_NAME
 - Maximum players: $MAX_PLAYERS
 - Server port: $SERVER_PORT
 - Query port: $QUERY_PORT
+- Server version: ${ETS2_SERVER_VERSION:-"1.47"}
 
 Server management:
-- To start the server:    ./start_ets2_server.sh
-- To stop the server:     ./stop_ets2_server.sh
-- To restart the server:  ./restart_ets2_server.sh
-- To monitor the server:  ./monitor_ets2_server.sh
+- GUI menu:          ./manage_ets2_server.sh
+- Start:             ./start_ets2_server.sh
+- Stop:              ./stop_ets2_server.sh
+- Restart:           ./restart_ets2_server.sh
+- Monitor:           ./monitor_ets2_server.sh
 
 Systemd service:
-- Start:      sudo systemctl start ets2-server
-- Stop:       sudo systemctl stop ets2-server
-- Restart:    sudo systemctl restart ets2-server
-- Status:     sudo systemctl status ets2-server
+- Start:             sudo systemctl start ets2-server
+- Stop:              sudo systemctl stop ets2-server
+- Restart:           sudo systemctl restart ets2-server
+- Status:            sudo systemctl status ets2-server
+- Enable at boot:    sudo systemctl enable ets2-server
+- Disable at boot:   sudo systemctl disable ets2-server
 
-NOTE: For a fully functioning server, you should replace the 
+Server files:
+- Main config:       $SERVER_DIR/server_config.sii
+- Packages config:   $SERVER_DIR/server_packages.sii
+- Executable:        $SERVER_DIR/bin/linux_x64/eurotrucks2_server
+
+Log files:
+- Setup log:         $LOG_FILE
+- Server log:        $ROOT_DIR/ets2_server.log
+- Monitor log:       $ROOT_DIR/ets2_monitor.log
+
+Backup:
+- Backup directory:  $BACKUP_DIR
+- Initial backup:    $(ls -t "$BACKUP_DIR"/*.tar.gz 2>/dev/null | head -1)
+
+IMPORTANT: For a fully functioning server, you should replace the 
 server_packages files with ones exported from your desktop game client.
 
 For more information, see:
-- ETS2_SERVER_README.md - Detailed server documentation
-- ets2_setup.log - Setup log file
+- $ROOT_DIR/ETS2_SERVER_README.md - Detailed server documentation
 ======================================================================
+
 EOF 
