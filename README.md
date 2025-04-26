@@ -13,6 +13,7 @@ A comprehensive bash script for automating the setup and configuration of a Euro
 - **Systemd integration** - Run your server as a system service
 - **Auto-recovery** - Monitors server status and restarts if crashed
 - **Firewall configuration** - Automatically sets up required firewall rules
+- **User management** - Creates a dedicated user when run as root
 - **Detailed documentation** - Comprehensive usage instructions
 
 ## 🔧 Requirements
@@ -46,6 +47,20 @@ If you don't specify a server token, a default one will be used.
 ```bash
 ./start_ets2_server.sh
 ```
+
+## 🧑‍💻 User Management
+
+When run as root, the script will:
+
+1. Prompt to create a dedicated user for running the server
+2. Offer options to:
+   - Generate a random secure password
+   - Set a password manually (with a 1-minute timeout)
+3. Add the user to the sudo group
+4. Copy the setup script to the new user's home directory
+5. Provide instructions to continue installation as the new user
+
+This ensures the server runs with proper permissions and follows security best practices.
 
 ## ⚙️ Configuration
 
