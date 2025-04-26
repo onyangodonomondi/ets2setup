@@ -1,33 +1,46 @@
-# 🚚 ETS2 Dedicated Server Setup Script
+# 🚚 ETS2 Dedicated Server Setup Script (Cross-Platform)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A comprehensive bash script for automating the setup and configuration of a Euro Truck Simulator 2 dedicated multiplayer server on Linux. Built with robust error handling and failsafe mechanisms.
+A comprehensive setup solution for automating the installation and configuration of a Euro Truck Simulator 2 dedicated multiplayer server on both Linux and Windows platforms. Built with robust error handling and failsafe mechanisms.
 
 ![Euro Truck Simulator 2](https://img.shields.io/badge/ETS2-Dedicated_Server-blue)
 
 ## 📋 Features
 
+- **Cross-platform support** - Works on both Linux and Windows servers
 - **One-command setup** - Automatically installs and configures everything needed
 - **Complete server management** - Start, stop, restart, and monitoring scripts
-- **Systemd integration** - Run your server as a system service
+- **Systemd integration** - Run your server as a system service (Linux)
 - **Auto-recovery** - Monitors server status and restarts if crashed
 - **Robust error handling** - Comprehensive error checking and recovery mechanisms
 - **Network retry logic** - Handles temporary network issues during downloads
-- **Firewall configuration** - Automatically sets up required firewall rules
-- **User management** - Creates a dedicated user when run as root
+- **Firewall configuration** - Automatically sets up required firewall rules (UFW on Linux, Windows Firewall on Windows)
+- **User management** - Creates a dedicated user when run as root (Linux)
 - **Detailed documentation** - Comprehensive usage instructions
 - **Self-healing capability** - Automatically recovers from common failure scenarios
+- **Mod management** - Toggle mods on/off with simple commands
 
 ## 🔧 Requirements
 
+### Linux
 - Linux server (Ubuntu/Debian recommended)
 - Sudo access
-- Internet connection for downloading server files
-- At least 1GB of free disk space
+- Bash shell
 - Required packages: curl, unzip, sudo, ufw, systemctl (installed automatically)
 
+### Windows
+- Windows 10 or Windows Server 2016 or newer
+- PowerShell 5.0 or higher
+- Administrator privileges (for firewall configuration)
+
+Both platforms require:
+- Internet connection for downloading server files
+- At least 1GB of free disk space
+
 ## 🚀 Quick Start
+
+### Linux Installation
 
 1. Clone this repository:
 ```bash
@@ -46,14 +59,28 @@ chmod +x setup_ETS2_server.sh
 ```
 If you don't specify a server token, a default one will be used.
 
-4. Start your server:
+### Windows Installation
+
+1. Download the PowerShell script or generate it from Linux:
 ```bash
-./start_ets2_server.sh
+./setup_ETS2_server.sh --generate-windows-script
 ```
 
-## 🧑‍💻 User Management
+2. Open PowerShell as Administrator and navigate to the script directory.
 
-When run as root, the script will:
+3. Allow script execution if needed:
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+4. Run the script:
+```powershell
+.\setup_ETS2_server.ps1 -SERVER_TOKEN "YOUR_SERVER_TOKEN"
+```
+
+## 🧑‍💻 User Management (Linux)
+
+When run as root on Linux, the script will:
 
 1. Prompt to create a dedicated user for running the server
 2. Offer options to:
@@ -67,7 +94,7 @@ This ensures the server runs with proper permissions and follows security best p
 
 ## 💪 Robustness Features
 
-The script includes numerous failsafe mechanisms for a reliable setup:
+The scripts include numerous failsafe mechanisms for a reliable setup:
 
 - **Comprehensive error handling** - Every critical operation is checked for success
 - **Automatic dependency installation** - Missing packages are automatically installed
@@ -81,11 +108,12 @@ The script includes numerous failsafe mechanisms for a reliable setup:
 
 ## ⚙️ Configuration
 
-The setup script creates several configuration files:
+The setup scripts create several configuration files:
 
-- `ets2server/server_config.sii` - Main server configuration
-- `ets2server/server_packages.sii` - Server packages information
-- `ets2-server.service` - Systemd service configuration
+- Linux: `ets2server/server_config.sii` - Main server configuration
+- Windows: `ets2server\server_config.sii` - Main server configuration
+- `server_packages.sii` - Server packages information
+- Linux: `ets2-server.service` - Systemd service configuration (Linux only)
 
 You can customize these files to change various server settings such as:
 - Server name and description
@@ -93,60 +121,89 @@ You can customize these files to change various server settings such as:
 - Game settings (traffic, damage, etc.)
 - Network settings
 
-## 📊 Server Management
+## 🔄 Mod Management
 
-### Starting the Server
+This package includes specialized scripts for toggling mods on and off without editing configuration files manually:
 
-```bash
-./start_ets2_server.sh
+### Windows Mod Management
+
+Use the PowerShell script to enable or disable mods:
+
+```powershell
+# Enable mods
+.\toggle_mods.ps1 -Enable
+
+# Disable mods
+.\toggle_mods.ps1
 ```
 
-The server will run in the background. You can check the logs with:
+### Linux Mod Management
+
+Use the Bash script with various options:
+
+```bash
+# Enable mods
+./toggle_mods.sh enable
+
+# Disable mods
+./toggle_mods.sh disable
+
+# Toggle between enabled/disabled state
+./toggle_mods.sh
+```
+
+Both scripts automatically create a backup of your configuration before making changes. Remember to restart your server after toggling mods for changes to take effect.
+
+## 📊 Server Management
+
+### Linux Commands
+
+```bash
+# Start the server
+./start_ets2_server.sh
+
+# Stop the server
+./stop_ets2_server.sh
+
+# Restart the server
+./restart_ets2_server.sh
+
+# Monitor the server
+./monitor_ets2_server.sh
+```
+
+You can also use systemd commands on Linux:
+```bash
+sudo systemctl start ets2-server
+sudo systemctl stop ets2-server
+sudo systemctl restart ets2-server
+sudo systemctl status ets2-server
+sudo systemctl enable ets2-server  # Enable auto-start on boot
+```
+
+### Windows Commands
+
+- Start server: Double-click `start_ets2_server.bat` or run in command prompt
+- Stop server: Double-click `stop_ets2_server.bat`
+- Restart server: Double-click `restart_ets2_server.bat`
+
+### Checking Logs
+
+On Linux, view logs with:
 ```bash
 tail -f ets2_server.log
 ```
 
-### Stopping the Server
-
-```bash
-./stop_ets2_server.sh
-```
-
-### Restarting the Server
-
-```bash
-./restart_ets2_server.sh
-```
-
-### Using Systemd Service
-
-```bash
-# Start the server
-sudo systemctl start ets2-server
-
-# Stop the server
-sudo systemctl stop ets2-server
-
-# Check status
-sudo systemctl status ets2-server
-
-# Enable auto-start on boot
-sudo systemctl enable ets2-server
-```
-
-### Monitoring
-
-The script installs a monitoring service that checks if the server is running every 5 minutes and restarts it if needed. You can also manually check the server status:
-
-```bash
-./monitor_ets2_server.sh
-```
+On Windows, check the log files in the installation directory.
 
 ## 🔥 Firewall Configuration
 
-The script automatically opens the required ports in the firewall:
+The scripts automatically open the required ports in the firewall:
 - TCP/UDP: 27015 (Game connection port)
 - TCP/UDP: 27016 (Query port)
+
+On Linux, UFW is used for firewall configuration.
+On Windows, Windows Firewall rules are created automatically.
 
 ## 📝 Troubleshooting
 
@@ -156,18 +213,26 @@ If the server fails to start, check:
    - `ets2_setup.log` - Installation logs
    - `ets2_server.log` - Server runtime logs
    - `ets2_restart.log` - Restart operation logs
-   - `ets2_monitor.log` - Monitoring logs
+   - `ets2_monitor.log` - Monitoring logs (Linux only)
 
 2. Common issues:
    - Ensure server_packages files are properly created
    - Verify the server_logon_token is correctly set
-   - Check available disk space with `df -h`
+   - Check available disk space
    - Verify network connectivity
+   - Ensure appropriate permissions are set on all executables
 
-3. Recovery:
-   - Force stop: `pkill -9 -f "eurotrucks2_server"`
-   - Remove PID: `rm ets2_server.pid`
-   - Restart: `./restart_ets2_server.sh`
+### Platform-Specific Issues
+
+#### Linux
+- If encountering permission issues, verify the script has execute permissions: `chmod +x *.sh`
+- For firewall issues, check UFW status: `sudo ufw status`
+- Recovery: `pkill -9 -f "eurotrucks2_server"`, `rm ets2_server.pid`, `./restart_ets2_server.sh`
+
+#### Windows
+- Run PowerShell as Administrator for firewall configuration
+- If Windows Firewall blocks the server, check the inbound rules in Windows Firewall settings
+- For script execution issues, ensure your execution policy allows running scripts: `Get-ExecutionPolicy`
 
 ## ⚠️ Important Notes
 
